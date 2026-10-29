@@ -1,0 +1,8 @@
+.venv/
+data/
+output/
+spark-events/
+runs.csv
+__pycache__/
+.idea/
+*.parquet
