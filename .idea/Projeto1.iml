@@ -5,7 +5,7 @@
       <excludeFolder url="file://$MODULE_DIR$/.venv" />
       <excludeFolder url="file://$MODULE_DIR$/models" />
     </content>
-    <orderEntry type="jdk" jdkName="Docker Compose (jupyter) (5)" jdkType="Python SDK" />
+    <orderEntry type="jdk" jdkName="~/PycharmProjects/JupyterProject/Projeto1/.venv" jdkType="Python SDK" />
     <orderEntry type="sourceFolder" forTests="false" />
   </component>
 </module>
