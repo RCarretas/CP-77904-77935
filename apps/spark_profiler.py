@@ -175,7 +175,7 @@ class SparkProfiler:
         # executorCpuTime is reported in nanoseconds; executorRunTime in ms.
         agg["executorCpuTime"] = agg["executorCpuTime"] // 1_000_000
 
-        return {
+        result = {
             "wall_time_s": round(wall_time, 2),
             "num_jobs": len(job_ids),
             "num_stages": len(wanted),
@@ -188,6 +188,97 @@ class SparkProfiler:
             "shuffle_write_bytes": agg["shuffleWriteBytes"],
             "memory_spilled_bytes": agg["memoryBytesSpilled"],
             "disk_spilled_bytes": agg["diskBytesSpilled"],
+        }
+        # Métricas de distribuição (leitura, skew, GC). Se falharem, não
+        # estragam as métricas de cima.
+        try:
+            result.update(self._collect_distribution(wanted, set(job_ids)))
+        except Exception as exc:
+            print(f"(métricas de distribuição não recolhidas: {exc!r})")
+        return result
+
+    # ------------------------------------------------------------------
+    # Métricas extra: distribuição das tarefas de leitura e de shuffle
+    # ------------------------------------------------------------------
+    _UNITS = {"B": 1, "KiB": 1024, "MiB": 1024**2, "GiB": 1024**3, "TiB": 1024**4}
+
+    @classmethod
+    def _parse_size(cls, text):
+        """'20.4 MiB' ou 'total (min, med, max ...)\\n20.4 MiB (...)' -> bytes."""
+        import re
+        line = text.split("\n")[-1] if "\n" in text else text
+        m = re.search(r"([\d.,]+)\s*(B|KiB|MiB|GiB|TiB)\b", line)
+        return int(float(m.group(1).replace(",", "")) * cls._UNITS[m.group(2)]) if m else 0
+
+    def _tasks(self, stage):
+        return self._get_json(
+            f"/api/v1/applications/{self.app_id}/stages/"
+            f"{stage['stageId']}/{stage['attemptId']}/taskList?length=100000")
+
+    @staticmethod
+    def _median(xs):
+        xs = sorted(xs)
+        if not xs:
+            return 0
+        n = len(xs)
+        return xs[n // 2] if n % 2 else (xs[n // 2 - 1] + xs[n // 2]) / 2
+
+    def _collect_distribution(self, stages, job_ids):
+        ran = [s for s in stages if s.get("status") == "COMPLETE"]
+
+        # Stages de leitura: as que leem registos da fonte. Ignora leituras
+        # minúsculas (ex.: o CSV das zonas, 265 linhas).
+        read_stages = [s for s in ran if s.get("inputRecords", 0) >= 1000]
+        read_tasks = [t for s in read_stages for t in self._tasks(s)]
+        read_dur = [t["duration"] for t in read_tasks if "duration" in t]
+        empty = sum(1 for t in read_tasks
+                    if t.get("taskMetrics", {}).get("inputMetrics", {}).get("recordsRead", 0) == 0)
+
+        # Stages que leem shuffle: skew = maior tarefa / mediana (em bytes lidos)
+        shuffle_stages = [s for s in ran if s.get("shuffleReadBytes", 0) > 0]
+        skews, sh_parts = [], []
+        for s in shuffle_stages:
+            sizes = [t.get("taskMetrics", {}).get("shuffleReadMetrics", {})
+                       .get("localBytesRead", 0)
+                     + t.get("taskMetrics", {}).get("shuffleReadMetrics", {})
+                       .get("remoteBytesRead", 0)
+                     for t in self._tasks(s)]
+            sh_parts.append(len(sizes))
+            med = self._median(sizes)
+            if med > 0:
+                skews.append(max(sizes) / med)
+
+        # Bytes dos ficheiros abertos: soma de 'size of files read' dos Scans
+        # (o inputBytes do stage vem subcontado com parquet em ficheiros locais).
+        files_bytes, files_read = 0, 0
+        for q in self._get_json(f"/api/v1/applications/{self.app_id}/sql"
+                                f"?details=true&length=100000"):
+            q_jobs = set(q.get("successJobIds", []) + q.get("failedJobIds", [])
+                         + q.get("runningJobIds", []))
+            if not (q_jobs & job_ids):
+                continue
+            for node in q.get("nodes", []):
+                if not node.get("nodeName", "").startswith("Scan"):
+                    continue
+                for m in node.get("metrics", []):
+                    if m["name"] == "size of files read":
+                        files_bytes += self._parse_size(m["value"])
+                    elif m["name"] == "number of files read":
+                        files_read += int(m["value"].replace(",", ""))
+
+        return {
+            "tasks_executed": sum(s.get("numCompleteTasks", 0) for s in ran),
+            "input_records": sum(s.get("inputRecords", 0) for s in ran),
+            "files_read": files_read,
+            "files_read_bytes": files_bytes,
+            "read_tasks": len(read_tasks),
+            "read_tasks_empty": empty,
+            "read_task_median_ms": round(self._median(read_dur)),
+            "read_task_max_ms": max(read_dur) if read_dur else 0,
+            "shuffle_stages": len(shuffle_stages),
+            "shuffle_partitions_max": max(sh_parts) if sh_parts else 0,
+            "shuffle_skew_max": round(max(skews), 2) if skews else 0,
+            "gc_time_ms": sum(s.get("jvmGcTime", 0) for s in ran),
         }
 
     @staticmethod
@@ -202,6 +293,7 @@ class SparkProfiler:
     _BYTE_KEYS = (
         "input_bytes", "output_bytes", "shuffle_read_bytes",
         "shuffle_write_bytes", "memory_spilled_bytes", "disk_spilled_bytes",
+        "files_read_bytes",
     )
 
     def report(self, names=None):
@@ -215,9 +307,9 @@ class SparkProfiler:
             for k in self._BYTE_KEYS:
                 row[k] = self._fmt_bytes(row[k])
             rows.append(row)
-        cols = ["run", "wall_time_s", "num_jobs", "num_stages", "num_tasks",
-                "executor_run_time_ms", "executor_cpu_time_ms"] + list(self._BYTE_KEYS)
-        return pd.DataFrame(rows)[cols].set_index("run")
+        df = pd.DataFrame(rows)
+        cols = ["run"] + [c for c in df.columns if c != "run"]
+        return df[cols].set_index("run")
 
     def compare(self, before, after):
         """Return a pandas DataFrame comparing two named runs, metric by metric, with % change."""
@@ -225,7 +317,7 @@ class SparkProfiler:
         b, a = self.runs[before], self.runs[after]
         rows = []
         for key in b:
-            bv, av = b[key], a[key]
+            bv, av = b[key], a.get(key, 0)
             if isinstance(bv, (int, float)) and bv:
                 change = f"{(av - bv) / bv * 100:+.1f}%"
             else:
