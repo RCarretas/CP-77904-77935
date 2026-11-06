@@ -21,7 +21,7 @@
 
 # ## Parâmetros
 
-# In[1]:
+# In[ ]:
 
 
 import sys, argparse
@@ -52,7 +52,7 @@ args
 
 # ## Setup
 
-# In[2]:
+# In[ ]:
 
 
 import os, time, csv
@@ -79,7 +79,7 @@ print("Spark", spark.version, "| master:", spark.sparkContext.master,
       "| cores:", spark.sparkContext.defaultParallelism)
 
 
-# In[3]:
+# In[ ]:
 
 
 sys.path.append("/workspace/apps")
@@ -90,7 +90,7 @@ profiler = SparkProfiler(spark)
 # ## M1 — Ingestão e limpeza
 # O schema muda entre ficheiros (ex.: `passenger_count` double vs long), por isso lê-se mês a mês e faz-se cast para um schema fixo.
 
-# In[4]:
+# In[ ]:
 
 
 TARGET_SCHEMA = StructType([
@@ -143,7 +143,7 @@ if args.fraction < 1.0:
     raw = raw.sample(withReplacement=False, fraction=args.fraction, seed=42)
 
 
-# In[5]:
+# In[ ]:
 
 
 tamanho = 0
@@ -152,7 +152,7 @@ for path, ano in files:
 print("tamanho:", tamanho)
 
 
-# In[6]:
+# In[ ]:
 
 
 def out_of_range(c):
@@ -180,7 +180,7 @@ trips = raw.filter(~ANY_BAD).drop("file_year")
 
 
 
-# In[7]:
+# In[ ]:
 
 
 with profiler.profile("M1"):
@@ -198,7 +198,7 @@ m1_pdf.set_index("file_year").T
 # ## M2 — Procura temporal
 # Por (pickup_borough, day_of_week, hour_of_day): nº de viagens, tarifa média, duração média (min), distância média. Escrito em Parquet particionado por borough.
 
-# In[8]:
+# In[ ]:
 
 
 with profiler.profile("M2"):
@@ -221,7 +221,7 @@ with profiler.profile("M2"):
 m2.explain(mode="formatted")
 
 
-# In[8]:
+# In[ ]:
 
 
 
@@ -230,7 +230,7 @@ m2.explain(mode="formatted")
 # ## M3 — Estatísticas por zona
 # Por zona e mês: média e desvio-padrão de fare e distância. Windows: rank no borough, quota rolante de 3 meses no borough, e flag quando o volume se afasta mais de 1.5σ da média rolante da própria zona (3 meses anteriores).
 
-# In[9]:
+# In[ ]:
 
 
 with profiler.profile("M3"):
@@ -280,7 +280,7 @@ with profiler.profile("M3"):
 # ## O1 — Anomalias de tarifa
 # Por (PULocationID, hour_of_day): média e σ de fare/km; flag quando fare/km > média + 3σ; taxa de anomalias dia útil vs fim de semana por payment_type e borough.
 
-# In[10]:
+# In[ ]:
 
 
 with profiler.profile("O1"):
@@ -316,7 +316,7 @@ with profiler.profile("O1"):
 # 
 # ⚠️ A parte Q1 vs Q3 precisa de dados de julho e setembro.
 
-# In[11]:
+# In[ ]:
 
 
 with profiler.profile("O2"):
@@ -364,7 +364,7 @@ with profiler.profile("O2"):
 # ## Métricas da run
 # Acrescenta uma linha por operação a `metrics.csv` (para comparar baseline vs otimizações e as runs de escalabilidade).
 
-# In[12]:
+# In[ ]:
 
 
 rep = profiler.report()
@@ -397,7 +397,7 @@ print("Métricas acrescentadas a", metrics_path)
 # - `shuffle_skew_max`: maior partição de shuffle / mediana (1 = equilibrado)
 # - `files_read_bytes`: tamanho dos ficheiros abertos (o `input_bytes` vem subcontado com parquet local)
 
-# In[13]:
+# In[ ]:
 
 
 cols = ["wall_time_s", "tasks_executed", "read_tasks", "read_tasks_empty",
@@ -410,21 +410,21 @@ rep[[c for c in cols if c in rep.columns]]
 # ## Planos de execução (para o relatório)
 # Procurar: `SortMergeJoin` vs `BroadcastHashJoin`, `Exchange`, colunas lidas no `FileScan`, nº de scans aos Parquet.
 
-# In[14]:
+# In[ ]:
 
 
 if IN_NOTEBOOK:
     m2.explain(mode="formatted")
 
 
-# In[15]:
+# In[ ]:
 
 
 if IN_NOTEBOOK:
     o1.explain(mode="formatted")
 
 
-# In[16]:
+# In[ ]:
 
 
 if IN_NOTEBOOK:
@@ -433,7 +433,7 @@ if IN_NOTEBOOK:
 
 # ## Ver os resultados
 
-# In[17]:
+# In[ ]:
 
 
 if IN_NOTEBOOK:
@@ -444,7 +444,7 @@ if IN_NOTEBOOK:
     spark.read.parquet(f"{out}/o2_top20_routes").orderBy("pickup_borough", "rank").show(10)
 
 
-# In[18]:
+# In[ ]:
 
 
 if not IN_NOTEBOOK:
